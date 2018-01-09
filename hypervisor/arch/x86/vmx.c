@@ -85,12 +85,12 @@ static struct paging ept_paging[EPT_PAGE_DIR_LEVELS];
 static u32 secondary_exec_addon;
 static unsigned long cr_maybe1[2], cr_required1[2];
 
-static bool vmxon(struct per_cpu *cpu_data)
+static bool vmxon(unsigned int cpu_id)
 {
 	unsigned long vmxon_addr;
 	u8 ok;
 
-	vmxon_addr = paging_hvirt2phys(&cpu_data->vmxon_region);
+	vmxon_addr = paging_hvirt2phys(&per_cpu(cpu_id)->vmxon_region);
 	asm volatile(
 		"vmxon (%1)\n\t"
 		"seta %0"
@@ -100,9 +100,9 @@ static bool vmxon(struct per_cpu *cpu_data)
 	return ok;
 }
 
-static bool vmcs_clear(struct per_cpu *cpu_data)
+static bool vmcs_clear(unsigned int cpu_id)
 {
-	unsigned long vmcs_addr = paging_hvirt2phys(&cpu_data->vmcs);
+	unsigned long vmcs_addr = paging_hvirt2phys(&per_cpu(cpu_id)->vmcs);
 	u8 ok;
 
 	asm volatile(
@@ -114,9 +114,9 @@ static bool vmcs_clear(struct per_cpu *cpu_data)
 	return ok;
 }
 
-static bool vmcs_load(struct per_cpu *cpu_data)
+static bool vmcs_load(unsigned int cpu_id)
 {
-	unsigned long vmcs_addr = paging_hvirt2phys(&cpu_data->vmcs);
+	unsigned long vmcs_addr = paging_hvirt2phys(&per_cpu(cpu_id)->vmcs);
 	u8 ok;
 
 	asm volatile(
@@ -675,15 +675,15 @@ int vcpu_init(struct per_cpu *cpu_data)
 		  ((cpuid_ecx(1, 0) & X86_FEATURE_XSAVE) ?
 		   X86_CR4_OSXSAVE : 0));
 
-	if (!vmxon(cpu_data))  {
+	if (!vmxon(cpu_data->cpu_id))  {
 		write_cr4(cpu_data->linux_cr4);
 		return trace_error(-EIO);
 	}
 
 	cpu_data->vmx_state = VMXON;
 
-	if (!vmcs_clear(cpu_data) ||
-	    !vmcs_load(cpu_data) ||
+	if (!vmcs_clear(cpu_data->cpu_id) ||
+	    !vmcs_load(cpu_data->cpu_id) ||
 	    !vmcs_setup(cpu_data))
 		return trace_error(-EIO);
 
@@ -702,7 +702,7 @@ void vcpu_exit(struct per_cpu *cpu_data)
 	 * the VMCS (a compiler barrier would be sufficient, in fact). */
 	memory_barrier();
 
-	vmcs_clear(cpu_data);
+	vmcs_clear(cpu_data->cpu_id);
 	asm volatile("vmxoff" : : : "cc");
 	cpu_data->linux_cr4 &= ~X86_CR4_VMXE;
 }
@@ -734,6 +734,7 @@ void __attribute__((noreturn)) vcpu_deactivate_vmm(void)
 	unsigned long *stack = (unsigned long *)vmcs_read64(GUEST_RSP);
 	unsigned long linux_ip = vmcs_read64(GUEST_RIP);
 	struct per_cpu *cpu_data = this_cpu_data();
+	unsigned int cpu_id = this_cpu_id();
 
 	cpu_data->linux_cr0 = vmcs_read64(GUEST_CR0);
 	cpu_data->linux_cr3 = vmcs_read64(GUEST_CR3);
@@ -786,7 +787,7 @@ void __attribute__((noreturn)) vcpu_deactivate_vmm(void)
 		"mov %%rax,%%rsp\n\t"
 		"xor %%rax,%%rax\n\t"
 		"ret"
-		: : "a" (stack), "b" (&cpu_data->guest_regs));
+		: : "a" (stack), "b" (&per_cpu(cpu_id)->guest_regs));
 	__builtin_unreachable();
 }
 
