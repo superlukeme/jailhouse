@@ -626,16 +626,16 @@ static void amd_iommu_completion_wait(struct amd_iommu *iommu)
 static void amd_iommu_init_fault_nmi(void)
 {
 	union x86_msi_vector msi_vec = {{ 0 }};
+	struct public_per_cpu *target_data;
 	union pci_msi_registers msi_reg;
-	struct per_cpu *cpu_data;
 	struct amd_iommu *iommu;
 	int n;
 
-	cpu_data = iommu_select_fault_reporting_cpu();
+	target_data = iommu_select_fault_reporting_cpu();
 
 	/* Send NMI to fault reporting CPU */
 	msi_vec.native.address = MSI_ADDRESS_VALUE;
-	msi_vec.native.destination = cpu_data->apic_id;
+	msi_vec.native.destination = target_data->apic_id;
 
 	msi_reg.msg32.enable = 1;
 	msi_reg.msg64.address = msi_vec.raw.address;
@@ -667,7 +667,7 @@ static void amd_iommu_init_fault_nmi(void)
 	 * amd_iommu_completion_wait(), as it seems that IOMMU either signal
 	 * an interrupt or do memory write, but not both.
 	 */
-	apic_send_nmi_ipi(cpu_data);
+	apic_send_nmi_ipi(target_data);
 }
 
 void iommu_config_commit(struct cell *cell_added_removed)
@@ -829,7 +829,7 @@ void iommu_check_pending_faults(void)
 {
 	struct amd_iommu *iommu;
 
-	if (this_cpu_data()->cpu_id != fault_reporting_cpu_id)
+	if (this_cpu_id() != fault_reporting_cpu_id)
 		return;
 
 	for_each_iommu(iommu) {

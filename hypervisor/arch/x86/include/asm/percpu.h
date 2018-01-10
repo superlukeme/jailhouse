@@ -32,10 +32,6 @@
 #include <asm/svm.h>
 #include <asm/vmx.h>
 
-/* Round up sizeof(struct per_cpu) to the next power of two. */
-#define PERCPU_SIZE_SHIFT \
-	(BITS_PER_LONG - __builtin_clzl(sizeof(struct per_cpu) - 1))
-
 /**
  * @defgroup Per-CPU Per-CPU Subsystem
  *
@@ -43,6 +39,58 @@
  *
  * @{
  */
+
+/** Per-CPU states accessible across all CPUs. */
+struct public_per_cpu {
+	/** Logical CPU ID (same as Linux). */
+	unsigned int cpu_id;
+	/** Physical APIC ID. */
+	u32 apic_id;
+	/** Owning cell. */
+	struct cell *cell;
+
+	/** Statistic counters. */
+	u32 stats[JAILHOUSE_NUM_CPU_STATS];
+
+	/**
+	 * Lock protecting CPU state changes done for control tasks.
+	 *
+	 * The lock protects the following fields (unless CPU is suspended):
+	 * @li public_per_cpu::suspend_cpu
+	 * @li public_per_cpu::cpu_suspended (except for spinning on it to
+	 *                                    become true)
+	 * @li public_per_cpu::wait_for_sipi
+	 * @li public_per_cpu::init_signaled
+	 * @li public_per_cpu::sipi_vector
+	 * @li public_per_cpu::flush_vcpu_caches
+	 */
+	spinlock_t control_lock;
+
+	/** Set to true for instructing the CPU to suspend. */
+	volatile bool suspend_cpu;
+	/** True if CPU is waiting for SIPI. */
+	volatile bool wait_for_sipi;
+	/** True if CPU is suspended. */
+	volatile bool cpu_suspended;
+	/** Set to true for pending an INIT signal. */
+	bool init_signaled;
+	/** Pending SIPI vector; -1 if none is pending. */
+	int sipi_vector;
+	/** Set to true for a pending TLB flush for the paging layer that does
+	 *  host physical <-> guest physical memory mappings. */
+	bool flush_vcpu_caches;
+	/** Set to true for pending cache allocation updates (Intel only). */
+	bool update_cat;
+	/** State of the shutdown process. Possible values:
+	 * @li SHUTDOWN_NONE: no shutdown in progress
+	 * @li SHUTDOWN_STARTED: shutdown in progress
+	 * @li negative error code: shutdown failed
+	 */
+	int shutdown_state;
+	/** True if CPU violated a cell boundary or cause some other failure in
+	 * guest mode. */
+	bool failed;
+} __attribute__((aligned(PAGE_SIZE)));
 
 /** Per-CPU states. */
 struct per_cpu {
@@ -56,18 +104,27 @@ struct per_cpu {
 		};
 	};
 
+	union {
+		struct {
+			/** VMXON region, required by VMX. */
+			struct vmcs vmxon_region
+				__attribute__((aligned(PAGE_SIZE)));
+			/** VMCS of this CPU, required by VMX. */
+			struct vmcs vmcs
+				__attribute__((aligned(PAGE_SIZE)));
+		};
+		struct {
+			/** VMCB block, required by SVM. */
+			struct vmcb vmcb
+				__attribute__((aligned(PAGE_SIZE)));
+			/** SVM Host save area; opaque to us. */
+			u8 host_state[PAGE_SIZE]
+				__attribute__((aligned(PAGE_SIZE)));
+		};
+	};
+
 	/** Linux stack pointer, used for handover to hypervisor. */
 	unsigned long linux_sp;
-
-	/** Logical CPU ID (same as Linux). */
-	unsigned int cpu_id;
-	/** Physical APIC ID. */
-	u32 apic_id;
-	/** Owning cell. */
-	struct cell *cell;
-
-	/** Statistic counters. */
-	u32 stats[JAILHOUSE_NUM_CPU_STATS];
 
 	/** Linux states, used for handover to/from hypervisor. @{ */
 	struct desc_table_reg linux_gdtr;
@@ -108,66 +165,10 @@ struct per_cpu {
 		enum {SVMOFF = 0, SVMON} svm_state;
 	};
 
-	/**
-	 * Lock protecting CPU state changes done for control tasks.
-	 *
-	 * The lock protects the following fields (unless CPU is suspended):
-	 * @li per_cpu::suspend_cpu
-	 * @li per_cpu::cpu_suspended (except for spinning on it to become
-	 *                             true)
-	 * @li per_cpu::wait_for_sipi
-	 * @li per_cpu::init_signaled
-	 * @li per_cpu::sipi_vector
-	 * @li per_cpu::flush_vcpu_caches
-	 */
-	spinlock_t control_lock;
-
-	/** Set to true for instructing the CPU to suspend. */
-	volatile bool suspend_cpu;
-	/** True if CPU is waiting for SIPI. */
-	volatile bool wait_for_sipi;
-	/** True if CPU is suspended. */
-	volatile bool cpu_suspended;
-	/** Set to true for pending an INIT signal. */
-	bool init_signaled;
-	/** Pending SIPI vector; -1 if none is pending. */
-	int sipi_vector;
-	/** Set to true for a pending TLB flush for the paging layer that does
-	 *  host physical <-> guest physical memory mappings. */
-	bool flush_vcpu_caches;
-	/** Set to true for pending cache allocation updates (Intel only). */
-	bool update_cat;
-	/** State of the shutdown process. Possible values:
-	 * @li SHUTDOWN_NONE: no shutdown in progress
-	 * @li SHUTDOWN_STARTED: shutdown in progress
-	 * @li negative error code: shutdown failed
-	 */
-	int shutdown_state;
-	/** True if CPU violated a cell boundary or cause some other failure in
-	 * guest mode. */
-	bool failed;
-
 	/** Number of iterations to clear pending APIC IRQs. */
 	unsigned int num_clear_apic_irqs;
 
-	union {
-		struct {
-			/** VMXON region, required by VMX. */
-			struct vmcs vmxon_region
-				__attribute__((aligned(PAGE_SIZE)));
-			/** VMCS of this CPU, required by VMX. */
-			struct vmcs vmcs
-				__attribute__((aligned(PAGE_SIZE)));
-		};
-		struct {
-			/** VMCB block, required by SVM. */
-			struct vmcb vmcb
-				__attribute__((aligned(PAGE_SIZE)));
-			/** SVM Host save area; opaque to us. */
-			u8 host_state[PAGE_SIZE]
-				__attribute__((aligned(PAGE_SIZE)));
-		};
-	};
+	struct public_per_cpu public;
 } __attribute__((aligned(PAGE_SIZE)));
 
 /**
@@ -187,7 +188,7 @@ static inline struct per_cpu *this_cpu_data(void)
  */
 static inline unsigned int this_cpu_id(void)
 {
-	return this_cpu_data()->cpu_id;
+	return this_cpu_data()->public.cpu_id;
 }
 
 /**
@@ -197,25 +198,31 @@ static inline unsigned int this_cpu_id(void)
  */
 static inline struct cell *this_cell(void)
 {
-	return this_cpu_data()->cell;
+	return this_cpu_data()->public.cell;
 }
 
 /**
- * Retrieve the data structure of the specified CPU.
+ * Retrieve the locally accessible data structure of the specified CPU.
  * @param cpu	ID of the target CPU.
  *
  * @return Pointer to per-CPU data structure.
  */
 static inline struct per_cpu *per_cpu(unsigned int cpu)
 {
-	struct per_cpu *cpu_data;
+	extern u8 __page_pool[];
 
-	asm volatile(
-		"lea __page_pool(%%rip),%0\n\t"
-		"add %1,%0\n\t"
-		: "=&q" (cpu_data)
-		: "qm" ((unsigned long)cpu << PERCPU_SIZE_SHIFT));
-	return cpu_data;
+	return (struct per_cpu *)(__page_pool + cpu * sizeof(struct per_cpu));
+}
+
+/**
+ * Retrieve the publicly accessible data structure of the specified CPU.
+ * @param cpu	ID of the target CPU.
+ *
+ * @return Pointer to per-CPU data structure.
+ */
+static inline struct public_per_cpu *public_per_cpu(unsigned int cpu)
+{
+	return &per_cpu(cpu)->public;
 }
 
 /** @} **/

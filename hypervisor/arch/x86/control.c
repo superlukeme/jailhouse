@@ -108,11 +108,11 @@ void arch_flush_cell_vcpu_caches(struct cell *cell)
 		if (cpu == this_cpu_id()) {
 			vcpu_tlb_flush();
 		} else {
-			per_cpu(cpu)->flush_vcpu_caches = true;
+			public_per_cpu(cpu)->flush_vcpu_caches = true;
 			/* make sure the value is written before we kick
 			 * the remote core */
 			memory_barrier();
-			apic_send_nmi_ipi(per_cpu(cpu));
+			apic_send_nmi_ipi(public_per_cpu(cpu));
 		}
 }
 
@@ -145,7 +145,7 @@ void arch_shutdown(void)
 
 void arch_suspend_cpu(unsigned int cpu_id)
 {
-	struct per_cpu *target_data = per_cpu(cpu_id);
+	struct public_per_cpu *target_data = public_per_cpu(cpu_id);
 	bool target_suspended;
 
 	spin_lock(&target_data->control_lock);
@@ -171,7 +171,7 @@ void arch_suspend_cpu(unsigned int cpu_id)
 
 void arch_resume_cpu(unsigned int cpu_id)
 {
-	struct per_cpu *target_data = per_cpu(cpu_id);
+	struct public_per_cpu *target_data = public_per_cpu(cpu_id);
 
 	/* take lock to avoid theoretical race with a pending suspension */
 	spin_lock(&target_data->control_lock);
@@ -183,14 +183,14 @@ void arch_resume_cpu(unsigned int cpu_id)
 
 void arch_reset_cpu(unsigned int cpu_id)
 {
-	per_cpu(cpu_id)->sipi_vector = APIC_BSP_PSEUDO_SIPI;
+	public_per_cpu(cpu_id)->sipi_vector = APIC_BSP_PSEUDO_SIPI;
 
 	arch_resume_cpu(cpu_id);
 }
 
 void arch_park_cpu(unsigned int cpu_id)
 {
-	per_cpu(cpu_id)->init_signaled = true;
+	public_per_cpu(cpu_id)->init_signaled = true;
 
 	arch_resume_cpu(cpu_id);
 }
@@ -198,7 +198,7 @@ void arch_park_cpu(unsigned int cpu_id)
 void x86_send_init_sipi(unsigned int cpu_id, enum x86_init_sipi type,
 			int sipi_vector)
 {
-	struct per_cpu *target_data = per_cpu(cpu_id);
+	struct public_per_cpu *target_data = public_per_cpu(cpu_id);
 	bool send_nmi = false;
 
 	spin_lock(&target_data->control_lock);
@@ -222,8 +222,8 @@ void x86_send_init_sipi(unsigned int cpu_id, enum x86_init_sipi type,
 /* control_lock has to be held */
 static void x86_enter_wait_for_sipi(struct per_cpu *cpu_data)
 {
-	cpu_data->init_signaled = false;
-	cpu_data->wait_for_sipi = true;
+	cpu_data->public.init_signaled = false;
+	cpu_data->public.wait_for_sipi = true;
 }
 
 void x86_check_events(void)
@@ -231,49 +231,50 @@ void x86_check_events(void)
 	struct per_cpu *cpu_data = this_cpu_data();
 	int sipi_vector = -1;
 
-	spin_lock(&cpu_data->control_lock);
+	spin_lock(&cpu_data->public.control_lock);
 
 	do {
-		if (cpu_data->init_signaled && !cpu_data->suspend_cpu) {
+		if (cpu_data->public.init_signaled &&
+		    !cpu_data->public.suspend_cpu) {
 			x86_enter_wait_for_sipi(cpu_data);
 			break;
 		}
 
-		cpu_data->cpu_suspended = true;
+		cpu_data->public.cpu_suspended = true;
 
-		spin_unlock(&cpu_data->control_lock);
+		spin_unlock(&cpu_data->public.control_lock);
 
-		while (cpu_data->suspend_cpu)
+		while (cpu_data->public.suspend_cpu)
 			cpu_relax();
 
-		spin_lock(&cpu_data->control_lock);
+		spin_lock(&cpu_data->public.control_lock);
 
-		cpu_data->cpu_suspended = false;
+		cpu_data->public.cpu_suspended = false;
 
-		if (cpu_data->sipi_vector >= 0) {
-			if (!cpu_data->failed) {
-				cpu_data->wait_for_sipi = false;
-				sipi_vector = cpu_data->sipi_vector;
+		if (cpu_data->public.sipi_vector >= 0) {
+			if (!cpu_data->public.failed) {
+				cpu_data->public.wait_for_sipi = false;
+				sipi_vector = cpu_data->public.sipi_vector;
 			}
-			cpu_data->sipi_vector = -1;
+			cpu_data->public.sipi_vector = -1;
 		}
-	} while (cpu_data->init_signaled);
+	} while (cpu_data->public.init_signaled);
 
-	if (cpu_data->flush_vcpu_caches) {
-		cpu_data->flush_vcpu_caches = false;
+	if (cpu_data->public.flush_vcpu_caches) {
+		cpu_data->public.flush_vcpu_caches = false;
 		vcpu_tlb_flush();
 	}
 
-	if (cpu_data->update_cat) {
-		cpu_data->update_cat = false;
+	if (cpu_data->public.update_cat) {
+		cpu_data->public.update_cat = false;
 		cat_update();
 	}
 
-	spin_unlock(&cpu_data->control_lock);
+	spin_unlock(&cpu_data->public.control_lock);
 
 	/* wait_for_sipi is only modified on this CPU, so checking outside of
 	 * control_lock is fine */
-	if (cpu_data->wait_for_sipi) {
+	if (cpu_data->public.wait_for_sipi) {
 		vcpu_park();
 	} else if (sipi_vector >= 0) {
 		printk("CPU %d received SIPI, vector %x\n", this_cpu_id(),
@@ -304,7 +305,7 @@ x86_exception_handler(struct exception_frame *frame)
 void __attribute__((noreturn)) arch_panic_stop(void)
 {
 	/* no lock required here as we won't change to false anymore */
-	this_cpu_data()->cpu_suspended = true;
+	this_cpu_data()->public.cpu_suspended = true;
 	asm volatile("1: hlt; jmp 1b");
 	__builtin_unreachable();
 }
@@ -313,9 +314,9 @@ void arch_panic_park(void)
 {
 	struct per_cpu *cpu_data = this_cpu_data();
 
-	spin_lock(&cpu_data->control_lock);
+	spin_lock(&cpu_data->public.control_lock);
 	x86_enter_wait_for_sipi(cpu_data);
-	spin_unlock(&cpu_data->control_lock);
+	spin_unlock(&cpu_data->public.control_lock);
 
 	vcpu_park();
 }

@@ -80,7 +80,7 @@ static void cell_suspend(struct cell *cell, struct per_cpu *cpu_data)
 {
 	unsigned int cpu;
 
-	for_each_cpu_except(cpu, cell->cpu_set, cpu_data->cpu_id)
+	for_each_cpu_except(cpu, cell->cpu_set, cpu_data->public.cpu_id)
 		arch_suspend_cpu(cpu);
 }
 
@@ -88,7 +88,8 @@ static void cell_resume(struct per_cpu *cpu_data)
 {
 	unsigned int cpu;
 
-	for_each_cpu_except(cpu, cpu_data->cell->cpu_set, cpu_data->cpu_id)
+	for_each_cpu_except(cpu, cpu_data->public.cell->cpu_set,
+			    cpu_data->public.cpu_id)
 		arch_resume_cpu(cpu);
 }
 
@@ -307,9 +308,10 @@ static void cell_destroy_internal(struct per_cpu *cpu_data, struct cell *cell)
 		arch_park_cpu(cpu);
 
 		set_bit(cpu, root_cell.cpu_set->bitmap);
-		per_cpu(cpu)->cell = &root_cell;
-		per_cpu(cpu)->failed = false;
-		memset(per_cpu(cpu)->stats, 0, sizeof(per_cpu(cpu)->stats));
+		public_per_cpu(cpu)->cell = &root_cell;
+		public_per_cpu(cpu)->failed = false;
+		memset(public_per_cpu(cpu)->stats, 0,
+		       sizeof(public_per_cpu(cpu)->stats));
 	}
 
 	for_each_mem_region(mem, cell->config, n) {
@@ -346,7 +348,7 @@ static int cell_create(struct per_cpu *cpu_data, unsigned long config_address)
 	int err;
 
 	/* We do not support creation over non-root cells. */
-	if (cpu_data->cell != &root_cell)
+	if (cpu_data->public.cell != &root_cell)
 		return -EPERM;
 
 	cell_suspend(&root_cell, cpu_data);
@@ -407,7 +409,7 @@ static int cell_create(struct per_cpu *cpu_data, unsigned long config_address)
 		goto err_free_cell;
 
 	/* don't assign the CPU we are currently running on */
-	if (cell_owns_cpu(cell, cpu_data->cpu_id)) {
+	if (cell_owns_cpu(cell, cpu_data->public.cpu_id)) {
 		err = trace_error(-EBUSY);
 		goto err_cell_exit;
 	}
@@ -435,8 +437,9 @@ static int cell_create(struct per_cpu *cpu_data, unsigned long config_address)
 		arch_park_cpu(cpu);
 
 		clear_bit(cpu, root_cell.cpu_set->bitmap);
-		per_cpu(cpu)->cell = cell;
-		memset(per_cpu(cpu)->stats, 0, sizeof(per_cpu(cpu)->stats));
+		public_per_cpu(cpu)->cell = cell;
+		memset(public_per_cpu(cpu)->stats, 0,
+		       sizeof(public_per_cpu(cpu)->stats));
 	}
 
 	/*
@@ -511,7 +514,7 @@ static int cell_management_prologue(enum management_task task,
 				    struct cell **cell_ptr)
 {
 	/* We do not support management commands over non-root cells. */
-	if (cpu_data->cell != &root_cell)
+	if (cpu_data->public.cell != &root_cell)
 		return -EPERM;
 
 	cell_suspend(&root_cell, cpu_data);
@@ -575,7 +578,7 @@ static int cell_start(struct per_cpu *cpu_data, unsigned long id)
 	arch_cell_reset(cell);
 
 	for_each_cpu(cpu, cell->cpu_set) {
-		per_cpu(cpu)->failed = false;
+		public_per_cpu(cpu)->failed = false;
 		arch_reset_cpu(cpu);
 	}
 
@@ -603,7 +606,7 @@ static int cell_set_loadable(struct per_cpu *cpu_data, unsigned long id)
 	 * suspension mode.
 	 */
 	for_each_cpu(cpu, cell->cpu_set) {
-		per_cpu(cpu)->failed = false;
+		public_per_cpu(cpu)->failed = false;
 		arch_park_cpu(cpu);
 	}
 
@@ -664,7 +667,7 @@ static int cell_get_state(struct per_cpu *cpu_data, unsigned long id)
 {
 	struct cell *cell;
 
-	if (cpu_data->cell != &root_cell)
+	if (cpu_data->public.cell != &root_cell)
 		return -EPERM;
 
 	/*
@@ -703,12 +706,12 @@ static int hypervisor_disable(struct per_cpu *cpu_data)
 {
 	static volatile unsigned int waiting_cpus;
 	static bool do_common_shutdown;
-	unsigned int this_cpu = cpu_data->cpu_id;
+	unsigned int this_cpu = cpu_data->public.cpu_id;
 	unsigned int cpu;
 	int state, ret;
 
 	/* We do not support shutdown over non-root cells. */
-	if (cpu_data->cell != &root_cell)
+	if (cpu_data->public.cell != &root_cell)
 		return -EPERM;
 
 	/*
@@ -737,19 +740,19 @@ static int hypervisor_disable(struct per_cpu *cpu_data)
 	 */
 	spin_lock(&shutdown_lock);
 
-	if (cpu_data->shutdown_state == SHUTDOWN_NONE) {
+	if (cpu_data->public.shutdown_state == SHUTDOWN_NONE) {
 		state = num_cells == 1 ? SHUTDOWN_STARTED : -EBUSY;
 		for_each_cpu(cpu, root_cell.cpu_set)
-			per_cpu(cpu)->shutdown_state = state;
+			public_per_cpu(cpu)->shutdown_state = state;
 	}
 
-	if (cpu_data->shutdown_state == SHUTDOWN_STARTED) {
+	if (cpu_data->public.shutdown_state == SHUTDOWN_STARTED) {
 		do_common_shutdown = true;
 		waiting_cpus++;
 		ret = 0;
 	} else {
-		ret = cpu_data->shutdown_state;
-		cpu_data->shutdown_state = SHUTDOWN_NONE;
+		ret = cpu_data->public.shutdown_state;
+		cpu_data->public.shutdown_state = SHUTDOWN_NONE;
 	}
 
 	spin_unlock(&shutdown_lock);
@@ -812,17 +815,17 @@ static int cpu_get_info(struct per_cpu *cpu_data, unsigned long cpu_id,
 	 * its cell_suspend(root_cell + this_cell) will not return before we
 	 * left this hypercall.
 	 */
-	if (cpu_data->cell != &root_cell &&
-	    !cell_owns_cpu(cpu_data->cell, cpu_id))
+	if (cpu_data->public.cell != &root_cell &&
+	    !cell_owns_cpu(cpu_data->public.cell, cpu_id))
 		return -EPERM;
 
 	if (type == JAILHOUSE_CPU_INFO_STATE) {
-		return per_cpu(cpu_id)->failed ? JAILHOUSE_CPU_FAILED :
+		return public_per_cpu(cpu_id)->failed ? JAILHOUSE_CPU_FAILED :
 			JAILHOUSE_CPU_RUNNING;
 	} else if (type >= JAILHOUSE_CPU_INFO_STAT_BASE &&
 		type - JAILHOUSE_CPU_INFO_STAT_BASE < JAILHOUSE_NUM_CPU_STATS) {
 		type -= JAILHOUSE_CPU_INFO_STAT_BASE;
-		return per_cpu(cpu_id)->stats[type] & BIT_MASK(30, 0);
+		return public_per_cpu(cpu_id)->stats[type] & BIT_MASK(30, 0);
 	} else
 		return -EINVAL;
 }
@@ -841,7 +844,7 @@ long hypercall(unsigned long code, unsigned long arg1, unsigned long arg2)
 {
 	struct per_cpu *cpu_data = this_cpu_data();
 
-	cpu_data->stats[JAILHOUSE_CPU_STAT_VMEXITS_HYPERCALL]++;
+	cpu_data->public.stats[JAILHOUSE_CPU_STAT_VMEXITS_HYPERCALL]++;
 
 	switch (code) {
 	case JAILHOUSE_HC_DISABLE:
@@ -861,7 +864,7 @@ long hypercall(unsigned long code, unsigned long arg1, unsigned long arg2)
 	case JAILHOUSE_HC_CPU_GET_INFO:
 		return cpu_get_info(cpu_data, arg1, arg2);
 	case JAILHOUSE_HC_DEBUG_CONSOLE_PUTC:
-		if (!(cpu_data->cell->config->flags &
+		if (!(cpu_data->public.cell->config->flags &
 		      JAILHOUSE_CELL_DEBUG_CONSOLE))
 			return -EPERM;
 		printk("%c", (char)arg1);
@@ -911,9 +914,9 @@ void panic_park(void)
 	panic_printk("Parking CPU %d (Cell: \"%s\")\n", this_cpu_id(),
 		     cell->config->name);
 
-	this_cpu_data()->failed = true;
+	this_cpu_data()->public.failed = true;
 	for_each_cpu(cpu, cell->cpu_set)
-		if (!per_cpu(cpu)->failed) {
+		if (!public_per_cpu(cpu)->failed) {
 			cell_failed = false;
 			break;
 		}

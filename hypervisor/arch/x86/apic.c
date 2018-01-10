@@ -132,7 +132,7 @@ int apic_cpu_init(struct per_cpu *cpu_data)
 	unsigned int xlc = MAX((apic_ext_features() >> 16) & 0xff,
 			       APIC_REG_XLVT3 - APIC_REG_XLVT0 + 1);
 	unsigned int apic_id = (unsigned int)phys_processor_id();
-	unsigned int cpu_id = cpu_data->cpu_id;
+	unsigned int cpu_id = cpu_data->public.cpu_id;
 	unsigned int n;
 	u32 ldr;
 
@@ -151,9 +151,9 @@ int apic_cpu_init(struct per_cpu *cpu_data)
 	}
 
 	apic_to_cpu_id[apic_id] = cpu_id;
-	cpu_data->apic_id = apic_id;
+	cpu_data->public.apic_id = apic_id;
 
-	cpu_data->sipi_vector = -1;
+	cpu_data->public.sipi_vector = -1;
 
 	/*
 	 * Extended APIC Register Space (currently, AMD thus xAPIC only).
@@ -206,7 +206,7 @@ int apic_init(void)
 	return 0;
 }
 
-void apic_send_nmi_ipi(struct per_cpu *target_data)
+void apic_send_nmi_ipi(struct public_per_cpu *target_data)
 {
 	apic_ops.send_ipi(target_data->apic_id,
 			  APIC_ICR_DLVR_NMI |
@@ -390,7 +390,8 @@ static void apic_send_ipi(unsigned int target_cpu_id, u32 orig_icr_hi,
 				   icr_lo & APIC_ICR_VECTOR_MASK);
 		break;
 	default:
-		apic_ops.send_ipi(per_cpu(target_cpu_id)->apic_id, icr_lo);
+		apic_ops.send_ipi(public_per_cpu(target_cpu_id)->apic_id,
+				  icr_lo);
 	}
 }
 
@@ -514,7 +515,7 @@ unsigned int apic_mmio_access(unsigned long rip,
 			if (!apic_handle_icr_write(val, dest))
 				return 0;
 		} else if (reg == APIC_REG_LDR &&
-			 val != 1UL << (this_cpu_id() + XAPIC_DEST_SHIFT)) {
+			   val != 1UL << (this_cpu_id() + XAPIC_DEST_SHIFT)) {
 			panic_printk("FATAL: Unsupported change to LDR: %x\n",
 				     val);
 			return 0;
