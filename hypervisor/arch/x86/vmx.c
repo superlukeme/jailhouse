@@ -85,12 +85,12 @@ static struct paging ept_paging[EPT_PAGE_DIR_LEVELS];
 static u32 secondary_exec_addon;
 static unsigned long cr_maybe1[2], cr_required1[2];
 
-static bool vmxon(unsigned int cpu_id)
+static bool vmxon(void)
 {
 	unsigned long vmxon_addr;
 	u8 ok;
 
-	vmxon_addr = paging_hvirt2phys(&per_cpu(cpu_id)->vmxon_region);
+	vmxon_addr = paging_hvirt2phys(&per_cpu(this_cpu_id())->vmxon_region);
 	asm volatile(
 		"vmxon (%1)\n\t"
 		"seta %0"
@@ -100,11 +100,12 @@ static bool vmxon(unsigned int cpu_id)
 	return ok;
 }
 
-static bool vmcs_clear(unsigned int cpu_id)
+static bool vmcs_clear(void)
 {
-	unsigned long vmcs_addr = paging_hvirt2phys(&per_cpu(cpu_id)->vmcs);
+	unsigned long vmcs_addr;
 	u8 ok;
 
+	vmcs_addr = paging_hvirt2phys(&per_cpu(this_cpu_id())->vmcs);
 	asm volatile(
 		"vmclear (%1)\n\t"
 		"seta %0"
@@ -114,11 +115,12 @@ static bool vmcs_clear(unsigned int cpu_id)
 	return ok;
 }
 
-static bool vmcs_load(unsigned int cpu_id)
+static bool vmcs_load(void)
 {
-	unsigned long vmcs_addr = paging_hvirt2phys(&per_cpu(cpu_id)->vmcs);
+	unsigned long vmcs_addr;
 	u8 ok;
 
+	vmcs_addr = paging_hvirt2phys(&per_cpu(this_cpu_id())->vmcs);
 	asm volatile(
 		"vmptrld (%1)\n\t"
 		"seta %0"
@@ -482,8 +484,9 @@ static bool vmx_set_guest_segment(const struct segment *seg,
 	return ok;
 }
 
-static bool vmcs_setup(struct per_cpu *cpu_data)
+static bool vmcs_setup(void)
 {
+	struct per_cpu *cpu_data = this_cpu_data();
 	struct desc_table_reg dtr;
 	unsigned long val;
 	bool ok = true;
@@ -674,16 +677,14 @@ int vcpu_init(struct per_cpu *cpu_data)
 		  ((cpuid_ecx(1, 0) & X86_FEATURE_XSAVE) ?
 		   X86_CR4_OSXSAVE : 0));
 
-	if (!vmxon(cpu_data->public.cpu_id))  {
+	if (!vmxon())  {
 		write_cr4(cpu_data->linux_cr4);
 		return trace_error(-EIO);
 	}
 
 	cpu_data->vmx_state = VMXON;
 
-	if (!vmcs_clear(cpu_data->public.cpu_id) ||
-	    !vmcs_load(cpu_data->public.cpu_id) ||
-	    !vmcs_setup(cpu_data))
+	if (!vmcs_clear() || !vmcs_load() || !vmcs_setup())
 		return trace_error(-EIO);
 
 	cpu_data->vmx_state = VMCS_READY;
@@ -701,12 +702,12 @@ void vcpu_exit(struct per_cpu *cpu_data)
 	 * the VMCS (a compiler barrier would be sufficient, in fact). */
 	memory_barrier();
 
-	vmcs_clear(cpu_data->public.cpu_id);
+	vmcs_clear();
 	asm volatile("vmxoff" : : : "cc");
 	cpu_data->linux_cr4 &= ~X86_CR4_VMXE;
 }
 
-void __attribute__((noreturn)) vcpu_activate_vmm(struct per_cpu *cpu_data)
+void __attribute__((noreturn)) vcpu_activate_vmm(void)
 {
 	/* We enter Linux at the point arch_entry would return to as well.
 	 * rax is cleared to signal success to the caller. */
@@ -720,7 +721,7 @@ void __attribute__((noreturn)) vcpu_activate_vmm(struct per_cpu *cpu_data)
 		"vmlaunch\n\t"
 		"pop %%rbp"
 		: /* no output */
-		: "a" (0), "D" (cpu_data->linux_reg)
+		: "a" (0), "D" (this_cpu_data()->linux_reg)
 		: "memory", "r15", "r14", "r13", "r12", "rbx", "rbp", "cc");
 
 	panic_printk("FATAL: vmlaunch failed, error %d\n",
@@ -732,8 +733,7 @@ void __attribute__((noreturn)) vcpu_deactivate_vmm(void)
 {
 	unsigned long *stack = (unsigned long *)vmcs_read64(GUEST_RSP);
 	unsigned long linux_ip = vmcs_read64(GUEST_RIP);
-	struct per_cpu *cpu_data = this_cpu_data();
-	unsigned int cpu_id = this_cpu_id();
+	struct per_cpu *cpu_data = per_cpu(this_cpu_id());
 
 	cpu_data->linux_cr0 = vmcs_read64(GUEST_CR0);
 	cpu_data->linux_cr3 = vmcs_read64(GUEST_CR3);
@@ -761,7 +761,7 @@ void __attribute__((noreturn)) vcpu_deactivate_vmm(void)
 	cpu_data->linux_fs.selector = vmcs_read16(GUEST_FS_SELECTOR);
 	cpu_data->linux_gs.selector = vmcs_read16(GUEST_GS_SELECTOR);
 
-	arch_cpu_restore(cpu_data, 0);
+	arch_cpu_restore(this_cpu_id(), 0);
 
 	stack--;
 	*stack = linux_ip;
@@ -786,7 +786,7 @@ void __attribute__((noreturn)) vcpu_deactivate_vmm(void)
 		"mov %%rax,%%rsp\n\t"
 		"xor %%rax,%%rax\n\t"
 		"ret"
-		: : "a" (stack), "b" (&per_cpu(cpu_id)->guest_regs));
+		: : "a" (stack), "b" (&cpu_data->guest_regs));
 	__builtin_unreachable();
 }
 

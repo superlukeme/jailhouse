@@ -206,9 +206,6 @@ int arch_cpu_init(struct per_cpu *cpu_data)
 	cpu_data->linux_cr3 = read_cr3();
 	write_cr3(paging_hvirt2phys(cpu_data->pg_structs.root_table));
 
-	/* reload cpu_data to use the private mapping from now on */
-	cpu_data = this_cpu_data();
-
 	cpu_data->pat = read_msr(MSR_IA32_PAT);
 	write_msr(MSR_IA32_PAT, PAT_RESET_VALUE);
 
@@ -229,7 +226,7 @@ int arch_cpu_init(struct per_cpu *cpu_data)
 	return 0;
 
 error_out:
-	arch_cpu_restore(cpu_data, err);
+	arch_cpu_restore(this_cpu_id(), err);
 	return err;
 }
 
@@ -252,15 +249,28 @@ int arch_init_late(void)
 	return cat_init();
 }
 
-void __attribute__((noreturn)) arch_cpu_activate_vmm(struct per_cpu *cpu_data)
-{
-	vcpu_activate_vmm(cpu_data);
-}
-
-void arch_cpu_restore(struct per_cpu *cpu_data, int return_code)
+void __attribute__((noreturn)) arch_cpu_activate_vmm(void)
 {
 	unsigned int cpu_id = this_cpu_id();
+
+	/*
+	 * Switch the stack to the private mapping before deactivating the
+	 * common one.
+	 */
+	asm volatile(
+		"add %0,%%rsp"
+		: : "g" (LOCAL_CPU_BASE - (unsigned long)per_cpu(cpu_id)));
+
+	/* Revoke full per_cpu access now that everything is set up. */
+	paging_map_all_per_cpu(cpu_id, false);
+
+	vcpu_activate_vmm();
+}
+
+void arch_cpu_restore(unsigned int cpu_id, int return_code)
+{
 	static spinlock_t tss_lock;
+	struct per_cpu *cpu_data = per_cpu(cpu_id);
 	unsigned int tss_idx;
 	u64 *linux_gdt;
 
@@ -275,9 +285,6 @@ void arch_cpu_restore(struct per_cpu *cpu_data, int return_code)
 	write_cr4(cpu_data->linux_cr4);
 	/* cr3 must be last in case cr4 enables PCID */
 	write_cr3(cpu_data->linux_cr3);
-
-	/* reload cpu_data because the private mapping no longer exists */
-	cpu_data = per_cpu(cpu_id);
 
 	/*
 	 * Copy Linux TSS descriptor into our GDT, clearing the busy flag,

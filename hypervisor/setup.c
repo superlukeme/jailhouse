@@ -23,8 +23,6 @@
 
 extern u8 __text_start[], __page_pool[];
 
-static const __attribute__((aligned(PAGE_SIZE))) u8 empty_page[PAGE_SIZE];
-
 static DEFINE_SPINLOCK(init_lock);
 static unsigned int master_cpu_id = -1;
 static volatile unsigned int initialized_cpus;
@@ -216,7 +214,7 @@ int entry(unsigned int cpu_id, struct per_cpu *cpu_data)
 	if (error) {
 		if (master)
 			shutdown();
-		arch_cpu_restore(cpu_data, error);
+		arch_cpu_restore(cpu_id, error);
 		return error;
 	}
 
@@ -224,7 +222,7 @@ int entry(unsigned int cpu_id, struct per_cpu *cpu_data)
 		printk("Activating hypervisor\n");
 
 	/* point of no return */
-	arch_cpu_activate_vmm(cpu_data);
+	arch_cpu_activate_vmm();
 }
 
 /** Hypervisor description header. */
